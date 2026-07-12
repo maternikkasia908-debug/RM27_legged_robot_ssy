@@ -19,78 +19,49 @@ namespace pyro
 /*                                1. 基础配置与指令层                          */
 /* ========================================================================== */
 
-/* DM joint motor configuration structure. */
-struct wl_dm_motor_cfg_t
-{
-    uint8_t tx_id;
-    uint8_t rx_id;
-    can_hub_t::which_can can;
-    float offset_angle;
-};
 
-/* DJI 3508 configuration structure.*/
-struct wl_dji_motor_cfg_t
-{
-    dji_motor_tx_frame_t::register_id_t tx_id;
-    can_hub_t::which_can can;
-};
-
-struct wl_pid_cfg_t
-{
-    float kp;
-    float ki;
-    float kd;
-    float integral_limit;
-    float max_out;
-};
-
-struct wl_kf_cfg_t
-{
-   float *x_init;
-   float *P_init;
-   float *A;
-   float *B;
-   float *H;
-   float *G;
-   float *Q;
-   float *R;
-};
 
 /* --- 配置依赖层 (Deps) --- */
 struct wl_chassis_cfg_t
 {
+ 
     wheel_legged_kin_t::phi_k_t phi_k;
     wheel_legged_kin_t::polar_k_t polar_k;
     wheel_legged_kin_t::vmc_k_t vmc_k;
+    
+    wheel_legged_kin_t _kinematic_solver;
 
-    wl_dm_motor_cfg_t joint_motor_cfg[4];
-    wl_dji_motor_cfg_t wheel_motor_cfg[2];
-    wl_dji_motor_cfg_t yaw_motor_cfg;
-    float yaw_offset;
-
-    wl_pid_cfg_t T_pid_cfg[2];
-    wl_pid_cfg_t d_T_pid_cfg[2];
-    wl_pid_cfg_t F_pid_cfg[2];
-    wl_pid_cfg_t d_F_pid_cfg[2];
-
-    wl_pid_cfg_t yaw_pid_cfg;
-    wl_pid_cfg_t g_yaw_pid_cfg;
-    wl_pid_cfg_t delta_pid_cfg;
-    wl_pid_cfg_t d_delta_pid_cfg;
-    wl_pid_cfg_t roll_pid_cfg;
-   
-    wl_kf_cfg_t wheel_kf_cfg[2]; 
     float *lqr_coef;
     float *lqr_coef_over_step;
+    //dji
     float wheel_radius;
     float reduction_ratio;
-    float rotate_min;
-    float rotate_max;
-    float position_min;
-    float position_max;
-    float torque_min;
-    float torque_max;
+    float yaw_offset;
+    
     wl_power_ctrl_cfg_t power_ctrl_cfg;
+    wl_power_ctrl_t    _power_ctrl;
+   
+
+ 
+    motor_base_t *joint_motors[4];
+    motor_base_t *wheel_motors[2];
+    motor_base_t *yaw_motor;
+
+    ins_drv_t         *_ins_drv;
+
+    pid_t *T_pid[2];
+    pid_t *d_T_pid[2];
+    pid_t *F_pid[2];
+    pid_t *d_F_pid[2];
+
+    pid_t *yaw_pid;
+    pid_t *g_yaw_pid;
+    pid_t *delta_pid;
+    pid_t *d_delta_pid;
+    pid_t *roll_pid;
+    
+    kf_t  *wheel_kf[2];
+
 };
 
 /* --- 指令层 (Cmd) --- */
@@ -160,7 +131,7 @@ struct wl_data_ctx_t
     float T_l_gain; 
     float roll_gain;
 
-    // 腿部核心状态结构体
+    // 腿部状态
     struct leg_data_t
     {
         float theta1, theta2;
@@ -193,22 +164,36 @@ struct wl_data_ctx_t
     } leg_data[2];
 
     // 计数器与状态标志
-    struct { uint16_t solver_error; } cnt;
-    struct { uint8_t is_aerial = 0; uint8_t aerial_cnt = 0; float test = 0; } flag;
+    struct { 
+             uint16_t solver_error; 
+            } cnt;
+
+    struct { uint8_t is_aerial = 0; 
+             uint8_t aerial_cnt = 0; 
+             float test = 0; 
+            } flag;
+
     struct {
-        uint8_t normal = 0, ready = 0, test = 0, reverse = 0, over_step = 0,
-                over_step_reset = 0, control = 0, jump = 0;
-    } active_mode_flag;
+        uint8_t normal = 0, 
+                ready = 0,
+                test = 0, 
+                reverse = 0, 
+                over_step = 0,  
+                over_step_reset = 0, 
+                control = 0, 
+                jump = 0;
+            } active_mode_flag;
 
     // 电容与功率反馈
     supercap_drv_t::chassis_cmd_t supercap_cmd;
+
     struct {
         float chassis_power;
         float voltage;
         float cap_power;
         float limit;
         float buffer_energy;
-    } power_data;
+            } power_data;
 };
 
 /* --- 模块总上下文 (ModuleCtx) --- */
@@ -238,12 +223,21 @@ class wl_chassis_t final : public module_base_t<wl_chassis_t, wl_chassis_params_
 
 public:
    
-   enum { RF = 0, RB = 1, LF = 2, LB = 3 };
-   enum { R = 0, L = 1 };
+   enum { 
+          RF = 0, 
+          RB = 1, 
+          LF = 2, 
+          LB = 3 
+        };
+   enum { 
+          R = 0, 
+          L = 1 
+        };
 
    wl_chassis_t(const wl_chassis_t &)            = delete;
    wl_chassis_t &operator=(const wl_chassis_t &) = delete;
 
+//派生方法
    status_t get_cur_angle(float *r_angle, float *l_angle);
    status_t get_cur_d_angle(float *r_angle, float *l_angle);
    status_t get_cur_length(float *r_leg, float *l_leg);
@@ -259,31 +253,14 @@ private:
     wl_chassis_t();
     ~wl_chassis_t() override = default;
 
-    // 继承自 module_base_t 接口
+    // 基态接口
     status_t _init() override;
     void _update_feedback() override;
     void _fsm_execute() override;
 
+    //data context
+    wl_chassis_ctx_t _ctx;
     
-    wheel_legged_kin_t _kinematic_solver;
-    wl_power_ctrl_t    _power_ctrl;
-    ins_drv_t         *_ins_drv;
-
-    pid_t             *_yaw_pid;
-    pid_t             *_g_yaw_pid;
-    pid_t             *_delta_pid;
-    pid_t             *_d_delta_pid;
-    pid_t             *_roll_pid;
-
-    dm_motor_drv_t          *_motor_drv[4];
-    dji_m3508_motor_drv_t   *_wheel_drv[2];
-    dji_gm_6020_motor_drv_t *_yaw_motor_drv;
-
-    kf_t               _wheel_kf[2];
-    pid_t             *_T_pid[2];
-    pid_t             *_d_T_pid[2];
-    pid_t             *_F_pid[2];
-    pid_t             *_d_F_pid[2];
 
     /* =====================================================
        FSM 声明 
@@ -369,8 +346,7 @@ private:
         void exit(wl_chassis_t *owner) override;
     } _state_passive;
 
-    friend class fsm_active_t;
-    friend class state_passive_t;
+  
     
     fsm_t<wl_chassis_t> _fsm;
 
